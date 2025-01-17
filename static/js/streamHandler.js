@@ -1,7 +1,9 @@
 // streamHandler.js
-import { appendUserMessage, appendAssistantMessage } from './chatUI.js';
+import { appendAssistantMessage, appendOsmaModeSwitchBox,hideOptionContainers  } from './chatUI.js';
+import { promptAbortProcess } from './osmaHandler.js';
 
-let abortController = null;
+
+export let abortController = null;
 
 /**
  * Optionally fixes double-escaped math delimiters.
@@ -41,110 +43,37 @@ function backgroundTyper(element, pendingTextRef, speed = 12) {
  * This function is triggered when the user clicks the send button.
  */
 export async function sendMessageStream() {
-  const inputField = document.getElementById("user-input");
-  const message = inputField.value.trim();
-  if (message === "") return;
-  inputField.value = "";
+console.log("sendMessageStream called");
 
-  // Hide welcome and options (if visible)
-  const welcomeMessageEl = document.querySelector(".welcome-message");
-  const optionsContainerEl = document.querySelector(".options-container");
-  if (welcomeMessageEl) welcomeMessageEl.style.display = "none";
-  if (optionsContainerEl) optionsContainerEl.style.display = "none";
+const inputField = document.getElementById("user-input");
+const message = inputField.value.trim();
 
-  // Append user message to chat
-  appendUserMessage(message);
+console.log("User input message:", message); // For debugging logs
 
-  // (Optional) You could also check for RAG usage here before streaming...
-
-  // Show typing indicator
-  const chatBox = document.getElementById("chat-box");
-  const typingIndicator = document.createElement("div");
-  typingIndicator.className = "assistant-message";
-  typingIndicator.innerHTML =
-    '<span class="typing-indicator"></span><span class="typing-indicator"></span><span class="typing-indicator"></span>';
-  chatBox.appendChild(typingIndicator);
-  chatBox.scrollTop = chatBox.scrollHeight;
-
-  // Use an AbortController if needed
-  abortController = new AbortController();
-  try {
-    const response = await fetch("/chat_stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-      signal: abortController.signal,
-    });
-    // Remove typing indicator
-    if (typingIndicator.parentNode) {
-      typingIndicator.parentNode.removeChild(typingIndicator);
-    }
-
-    // Prepare assistant message container
-    const assistantMessageDiv = appendAssistantMessage();
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      assistantMessageDiv.innerText = `Error: ${errorData.message}`;
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let pendingTextRef = { text: "" };
-
-    async function readChunk() {
-      const { done, value } = await reader.read();
-      if (done) {
-        // Append any remaining pending text
-        if (pendingTextRef.text.length > 0) {
-          assistantMessageDiv.innerHTML += pendingTextRef.text;
-          pendingTextRef.text = "";
-        }
-        // When streaming is complete, trigger MathJax for the entire container
-        if (window.MathJax) {
-          console.log("Final chunk complete. Triggering MathJax.typesetPromise on assistantMessageDiv.");
-          window.MathJax.typesetPromise([assistantMessageDiv])
-            .then(() => console.log("MathJax re-typeset successfully after final chunk."))
-            .catch(err => console.error("MathJax typeset error:", err));
-        }
-        return;
-      }
-
-      let chunkText = decoder.decode(value, { stream: true });
-      chunkText = fixMathDelimiters(chunkText);
-      // Accumulate text
-      pendingTextRef.text += chunkText;
-      // Gradually append the new text
-      backgroundTyper(assistantMessageDiv, pendingTextRef, 12);
-      chatBox.scrollTop = chatBox.scrollHeight;
-      readChunk();
-    }
-    readChunk();
-
-  } catch (err) {
-    if (typingIndicator.parentNode) {
-      typingIndicator.parentNode.removeChild(typingIndicator);
-    }
-    const errorMessageDiv = appendAssistantMessage(`Request error: ${err}`);
-    console.error("Streaming error:", err);
-  }
+if (message === "") {
+  console.log("Empty message. Aborting send.");
+  return;
 }
 
-/**
- * Similar to sendMessageStream, but triggers when an option-box is clicked.
- */
-export async function sendOptionMessage(message) {
-  // Hide welcome and options
-  const welcomeMessageEl = document.querySelector(".welcome-message");
-  const optionsContainerEl = document.querySelector(".options-container");
-  if (welcomeMessageEl) welcomeMessageEl.style.display = "none";
-  if (optionsContainerEl) optionsContainerEl.style.display = "none";
+  // Hide welcome + options at first user message
+  hideOptionContainers();
 
-  // Append user message to chat
-  appendUserMessage(message);
+  // Display user message
+  const chatBox = document.getElementById("chat-box");
+  const userMessageDiv = document.createElement("div");
+  userMessageDiv.className = "user-message";
+  userMessageDiv.innerText = message;
+  chatBox.appendChild(userMessageDiv);
+  chatBox.scrollTop = chatBox.scrollHeight;
 
-  // Check if backend will use RAG
+  // **Trigger Abort Prompt Only When Sending a Message in OSMA Session**
+  if (window.isOSMASession) {
+    console.log("OSMA mode is active; prompting to abort.");
+    promptAbortProcess();
+    return;
+  }
+
+    // (1) Verificar si el backend va a usar RAG
   let isRag = false;
   try {
     const ragResp = await fetch("/check_rag", {
@@ -158,81 +87,293 @@ export async function sendOptionMessage(message) {
     console.error("Error checking RAG:", err);
   }
 
+  // (2) Si isRag=true, mostramos un aviso especial, arriba de los typing indicators
   let ragMessageDiv = null;
   if (isRag) {
     ragMessageDiv = document.createElement("div");
+    // Usa clases de "assistant-message" más una clase especial de blink
     ragMessageDiv.className = "assistant-message rag-status-blink";
     ragMessageDiv.innerText = "Buscando información en los documentos de referencia...";
-    document.getElementById("chat-box").appendChild(ragMessageDiv);
+    chatBox.appendChild(ragMessageDiv);
+    chatBox.scrollTop = chatBox.scrollHeight;
   }
 
   // Show typing indicator
-  const chatBox = document.getElementById("chat-box");
   const typingIndicator = document.createElement("div");
   typingIndicator.className = "assistant-message";
-  typingIndicator.innerHTML = '<span class="typing-indicator"></span><span class="typing-indicator"></span><span class="typing-indicator"></span>';
+  typingIndicator.innerHTML =
+    '<span class="typing-indicator"></span><span class="typing-indicator"></span><span class="typing-indicator"></span>';
   chatBox.appendChild(typingIndicator);
   chatBox.scrollTop = chatBox.scrollHeight;
 
+  // IMPORTANT: Use an AbortController if you want to stop streaming
+  abortController = new AbortController();
   try {
     const response = await fetch("/chat_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message: message }),
+      signal: abortController.signal, // pass signal here
     });
 
-    if (typingIndicator.parentNode) {
-      typingIndicator.parentNode.removeChild(typingIndicator);
-    }
+    // Remove typing indicator
+    chatBox.removeChild(typingIndicator);
+
+    // Quitar el ragMessageDiv (si existe) cuando ya empieza la respuesta
     if (ragMessageDiv && ragMessageDiv.parentNode) {
       ragMessageDiv.parentNode.removeChild(ragMessageDiv);
     }
 
-    const assistantMessageDiv = appendAssistantMessage();
+    // Prepare assistant message container
+    const assistantMessageDiv = document.createElement("div");
+    assistantMessageDiv.className = "assistant-message";
+    chatBox.appendChild(assistantMessageDiv);
 
+    // Check response OK
     if (!response.ok) {
       const errorData = await response.json();
       assistantMessageDiv.innerText = `Error: ${errorData.message}`;
       return;
     }
 
+    // We'll type out the streamed text chunk by chunk
+    let pendingText = "";
+    let isTyping = false;
+
+    function backgroundTyper(element, speed = 12) {
+      if (isTyping) return; // If already typing, do nothing
+      isTyping = true;
+
+      function typeNextChar() {
+        if (pendingText.length > 0) {
+          const nextChar = pendingText.charAt(0);
+          pendingText = pendingText.slice(1);
+          element.innerHTML += nextChar;
+          setTimeout(typeNextChar, speed);
+        } else {
+          // Done typing for now
+          isTyping = false;
+        }
+      }
+      typeNextChar();
+    }
+
+    // Start reading streaming chunks
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
-    let pendingTextRef = { text: "" };
 
     async function readChunk() {
       const { done, value } = await reader.read();
       if (done) {
-        if (pendingTextRef.text.length > 0) {
-          assistantMessageDiv.innerHTML += pendingTextRef.text;
-          pendingTextRef.text = "";
-        }
-        if (window.MathJax) {
-          console.log("Final chunk complete for option message. Triggering MathJax.typesetPromise on assistantMessageDiv.");
-          window.MathJax.typesetPromise([assistantMessageDiv])
-            .then(() => console.log("MathJax re-typeset successfully after final chunk (option message)."))
-            .catch(err => console.error("MathJax typeset error:", err));
-        }
+        // Espera a que finalice la escritura del texto pendiente y MathJax (si aplica)
+        let intervalId = setInterval(() => {
+          if (pendingText.length === 0) {
+            clearInterval(intervalId);
+            if (window.MathJax) {
+              console.log("Math delimiters balanced. Triggering MathJax.typesetPromise on assistantMessageDiv.");
+              window.MathJax.typesetPromise([assistantMessageDiv])
+                .then(() => {
+                  console.log("MathJax re-typeset successfully after final chunk.");
+                  // Agregar el cuadro OSMA al finalizar la respuesta
+                  appendOsmaModeSwitchBox();
+                })
+                .catch((err) => { console.error("MathJax typeset error:", err); });
+            } else {
+              // Si MathJax no está presente, se agrega directamente el cuadro
+              appendOsmaModeSwitchBox();
+            }
+          }
+        }, 50);
         return;
       }
 
+
       let chunkText = decoder.decode(value, { stream: true });
-      chunkText = fixMathDelimiters(chunkText);
-      pendingTextRef.text += chunkText;
-      backgroundTyper(assistantMessageDiv, pendingTextRef, 12);
-      chatBox.scrollTop = chatBox.scrollHeight;
-      readChunk();
+
+      // Accumulate chunk text
+      pendingText += chunkText;
+
+      // Start typing
+      backgroundTyper(assistantMessageDiv, 12); // type chunk
+
+      // Auto-scroll to bottom
+      chatBox.scrollTop = chatBox.scrollHeight;  // auto-scroll
+
+      readChunk(); // keep reading
     }
     readChunk();
 
   } catch (err) {
+    // If there's an error or we aborted
+    chatBox.removeChild(typingIndicator);
+
+    const errorMessageDiv = document.createElement("div");
+    errorMessageDiv.className = "assistant-message";
+    errorMessageDiv.innerText = `Request error: ${err}`;
+    chatBox.appendChild(errorMessageDiv);
+  }
+}
+
+/**
+ * Similar to sendMessageStream, but triggers when an option-box is clicked.
+ */
+export async function sendOptionMessage(message) {
+  console.log("sendOptionMessage called with message:", message);
+  // 1. Oculta todos los contenedores de opciones
+  hideOptionContainers();
+
+  // 2) Mostrar el mensaje del usuario en el chat
+  const chatBox = document.getElementById("chat-box");
+  const userMessageDiv = document.createElement("div");
+  userMessageDiv.className = "user-message";
+  userMessageDiv.innerText = message;
+  chatBox.appendChild(userMessageDiv);
+  chatBox.scrollTop = chatBox.scrollHeight;
+
+  // **Trigger Abort Prompt Only When Sending a Message in OSMA Session**
+  if (window.isOSMASession) {
+    console.log("OSMA mode is active; prompting to abort.");
+    promptAbortProcess();
+    return;
+  }
+
+
+  // 3) Verificar si el backend usará RAG (check_rag)
+  let isRag = false;
+  try {
+    const ragResp = await fetch("/check_rag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message })
+    });
+    const ragData = await ragResp.json();
+    isRag = ragData.is_rag;  // true o false
+  } catch (err) {
+    console.error("Error checking RAG:", err);
+  }
+
+  // 4) Si RAG es True, mostrar un aviso especial antes de los typing indicators
+  let ragMessageDiv = null;
+  if (isRag) {
+    ragMessageDiv = document.createElement("div");
+    // Usa la clase de burbuja del asistente y una clase blink si quieres animar
+    ragMessageDiv.className = "assistant-message rag-status-blink";
+    ragMessageDiv.innerText = "Buscando información en los documentos de referencia...";
+    chatBox.appendChild(ragMessageDiv);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  // 5) Mostrar indicador de escritura
+  const typingIndicator = document.createElement("div");
+  typingIndicator.className = "assistant-message";
+  typingIndicator.innerHTML = `<span class="typing-indicator"></span> <span class="typing-indicator"></span><span class="typing-indicator"></span>`;
+  chatBox.appendChild(typingIndicator);
+  chatBox.scrollTop = chatBox.scrollHeight;
+
+  // 6) Llamar al endpoint /chat_stream para obtener la respuesta en streaming
+  try {
+    const response = await fetch("/chat_stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message })
+    });
+
+    // Quitar el indicador de escritura (si aún está en el DOM)
+    if (typingIndicator.parentNode) {
+      typingIndicator.parentNode.removeChild(typingIndicator);
+    }
+    // Quitar el mensaje RAG si existe
+    if (ragMessageDiv && ragMessageDiv.parentNode) {
+      ragMessageDiv.parentNode.removeChild(ragMessageDiv);
+    }
+
+    // Crear contenedor para la respuesta del asistente
+    const assistantMessageDiv = document.createElement("div");
+    assistantMessageDiv.className = "assistant-message";
+    chatBox.appendChild(assistantMessageDiv);
+
+    // Si la respuesta no es OK, mostrar el error
+    if (!response.ok) {
+      const errorData = await response.json();
+      assistantMessageDiv.innerText = `Error: ${errorData.message}`;
+      return;
+    }
+
+    // 7) Procesar el streaming de la respuesta
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let pendingText = "";
+    let isTyping = false;
+
+    function backgroundTyper(element, speed = 12) {
+      if (isTyping) return;
+      isTyping = true;
+
+      function typeNextChar() {
+        if (pendingText.length > 0) {
+          const nextChar = pendingText.charAt(0);
+          pendingText = pendingText.slice(1);
+          element.innerHTML += nextChar;
+          setTimeout(typeNextChar, speed);
+        } else {
+          isTyping = false;
+        }
+      }
+      typeNextChar();
+    }
+
+
+    async function readChunk() {
+      const { done, value } = await reader.read();
+      if (done) {
+        // Espera a que finalice la escritura del texto pendiente y MathJax (si aplica)
+        let intervalId = setInterval(() => {
+          if (pendingText.length === 0) {
+            clearInterval(intervalId);
+            if (window.MathJax) {
+              console.log("Math delimiters balanced. Triggering MathJax.typesetPromise on assistantMessageDiv.");
+              window.MathJax.typesetPromise([assistantMessageDiv])
+                .then(() => {
+                  console.log("MathJax re-typeset successfully after final chunk.");
+                  // Agregar el cuadro OSMA al finalizar la respuesta
+                  appendOsmaModeSwitchBox();
+                })
+                .catch((err) => { console.error("MathJax typeset error:", err); });
+            } else {
+              // Si MathJax no está presente, se agrega directamente el cuadro
+              appendOsmaModeSwitchBox();
+            }
+          }
+        }, 50);
+        return;
+      }
+
+      let chunkText = decoder.decode(value, { stream: true });
+
+      // Accumulate chunk text
+      pendingText += chunkText;
+
+      // Start typing
+      backgroundTyper(assistantMessageDiv, 12); // type chunk
+
+      // Auto-scroll to bottom
+      chatBox.scrollTop = chatBox.scrollHeight;  // auto-scroll
+
+      readChunk(); // keep reading
+    }
+    readChunk();
+
+  } catch (err) {
+    // 8) Manejo de errores
     if (typingIndicator.parentNode) {
       typingIndicator.parentNode.removeChild(typingIndicator);
     }
     if (ragMessageDiv && ragMessageDiv.parentNode) {
       ragMessageDiv.parentNode.removeChild(ragMessageDiv);
     }
-    appendAssistantMessage(`Error: ${err}`);
-    console.error("Error in sendOptionMessage:", err);
+    const errorMessageDiv = document.createElement("div");
+    errorMessageDiv.className = "assistant-message";
+    errorMessageDiv.innerText = `Error: ${err}`;
+    chatBox.appendChild(errorMessageDiv);
   }
 }
